@@ -1,0 +1,139 @@
+# Monitoring and Observability Configuration for OpenManus
+
+[monitoring]
+# Enable/disable monitoring features
+enabled = true
+collect_metrics = true
+enable_health_checks = true
+enable_performance_tracking = true
+
+# Metrics collection settings
+[monitoring.metrics]
+# Maximum number of metrics to keep in memory
+max_metrics_history = 10000
+# Metrics collection interval in seconds
+collection_interval = 30
+# Enable Prometheus metrics export
+prometheus_enabled = true
+# Prometheus metrics port
+prometheus_port = 9090
+
+# Health check settings
+[monitoring.health_checks]
+# Health check interval in seconds
+check_interval = 30
+# Maximum number of health check results to keep
+max_history = 100
+# Timeout for individual health checks in seconds
+check_timeout = 10
+
+# Critical thresholds for system health
+[monitoring.health_checks.thresholds]
+cpu_warning = 80.0
+cpu_critical = 95.0
+memory_warning = 80.0
+memory_critical = 95.0
+disk_warning = 85.0
+disk_critical = 95.0
+
+# Performance monitoring settings
+[monitoring.performance]
+# Enable slow operation detection
+detect_slow_operations = true
+# Threshold for slow operations in seconds
+slow_operation_threshold = 5.0
+# Enable performance metrics collection
+collect_operation_metrics = true
+# Maximum number of performance samples per operation
+max_samples_per_operation = 1000
+
+# Logging configuration
+[monitoring.logging]
+# Log level for monitoring components
+log_level = "INFO"
+# Enable structured logging
+structured_logging = true
+# Enable correlation ID tracking
+correlation_tracking = true
+# Maximum log message length before truncation
+max_log_length = 1000
+
+# Security monitoring
+[monitoring.security]
+# Enable security event logging
+enable_security_logging = true
+# Log security events at this level or higher
+security_log_level = "WARNING"
+# Track failed authentication attempts
+track_auth_failures = true
+
+# Dashboard configuration
+[monitoring.dashboard]
+# Enable web dashboard
+enabled = true
+# Dashboard refresh interval in seconds
+refresh_interval = 30
+# Number of recent metrics to display
+recent_metrics_count = 100
+# Enable real-time updates
+real_time_updates = true
+
+# HTTP endpoints configuration
+[monitoring.endpoints]
+# Enable HTTP monitoring endpoints
+enabled = true
+# Port for monitoring endpoints
+port = 8080
+# Host to bind to
+host = "0.0.0.0"
+# Enable CORS for dashboard access
+enable_cors = true
+
+# Endpoint paths
+[monitoring.endpoints.paths]
+health = "/health"
+health_live = "/health/live"
+health_ready = "/health/ready"
+metrics = "/metrics"
+metrics_json = "/metrics/json"
+status = "/status"
+info = "/info"
+
+# Alerting configuration
+[monitoring.alerting]
+# Enable alerting
+enabled = false
+# Alert channels (email, slack, webhook)
+channels = []
+# Alert thresholds
+error_rate_threshold = 10.0   # Percentage
+response_time_threshold = 5.0 # Seconds
+
+# Data retention settings
+[monitoring.retention]
+# How long to keep metrics in memory (hours)
+metrics_retention_hours = 24
+# How long to keep health check history (hours)
+health_check_retention_hours = 48
+# How long to keep performance data (hours)
+performance_retention_hours = 24
+
+# Export settings
+[monitoring.export]
+# Enable metrics export to external systems
+enabled = false
+# Export format (prometheus, json, csv)
+format = "prometheus"
+# Export interval in seconds
+interval = 60
+# Export destination
+destination = ""
+
+# Development settings
+[monitoring.development]
+# Enable debug mode for monitoring
+debug_mode = false
+# Enable verbose logging
+verbose_logging = false
+# Enable monitoring of monitoring system itself
+self_monitoring = true
