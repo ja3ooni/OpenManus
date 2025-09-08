@@ -303,3 +303,31 @@ class CircuitBreakerOpenError(CircuitBreakerError):
         super().__init__(
             f"Circuit breaker is open for service: {service}", service=service, **kwargs
         )
+
+
+# Research and Analysis Errors
+class ResearchError(OpenManusError):
+    """Raised when research operations fail"""
+
+    def __init__(self, message: str, query: Optional[str] = None, **kwargs):
+        super().__init__(
+            message,
+            classification=ErrorClassification.TRANSIENT,
+            recoverable=True,
+            **kwargs,
+        )
+        self.query = query
+
+
+class ToolExecutionError(ToolError):
+    """Raised when tool execution fails"""
+
+    def __init__(
+        self,
+        message: str,
+        tool_name: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        **kwargs,
+    ):
+        super().__init__(message, tool_name=tool_name, **kwargs)
+        self.exit_code = exit_code

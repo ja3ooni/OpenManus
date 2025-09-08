@@ -33,18 +33,21 @@ class DockerSandbox:
         self,
         config: Optional[SandboxSettings] = None,
         volume_bindings: Optional[Dict[str, str]] = None,
+        security_manager=None,
     ):
         """Initializes a sandbox instance.
 
         Args:
             config: Sandbox configuration. Default configuration used if None.
             volume_bindings: Volume mappings in {host_path: container_path} format.
+            security_manager: Security manager for validation (optional).
         """
         self.config = config or SandboxSettings()
         self.volume_bindings = volume_bindings or {}
         self.client = docker.from_env()
         self.container: Optional[Container] = None
         self.terminal: Optional[AsyncDockerizedTerminal] = None
+        self.security_manager = security_manager
 
     async def create(self) -> "DockerSandbox":
         """Creates and starts the sandbox container.
@@ -91,7 +94,7 @@ class DockerSandbox:
             self.terminal = AsyncDockerizedTerminal(
                 container["Id"],
                 self.config.work_dir,
-                env_vars={"PYTHONUNBUFFERED": "1"}
+                env_vars={"PYTHONUNBUFFERED": "1"},
                 # Ensure Python output is not buffered
             )
             await self.terminal.init()
@@ -150,9 +153,18 @@ class DockerSandbox:
         Raises:
             RuntimeError: If sandbox not initialized or command execution fails.
             TimeoutError: If command execution times out.
+            PermissionError: If command is blocked by security policy.
         """
         if not self.terminal:
             raise RuntimeError("Sandbox not initialized")
+
+        # Validate command against security policy if security manager is available
+        if self.security_manager and self.container:
+            is_allowed = await self.security_manager.validate_command_execution(
+                self.container.id, cmd
+            )
+            if not is_allowed:
+                raise PermissionError(f"Command blocked by security policy: {cmd}")
 
         try:
             return await self.terminal.run_command(
@@ -175,9 +187,18 @@ class DockerSandbox:
         Raises:
             FileNotFoundError: If file does not exist.
             RuntimeError: If read operation fails.
+            PermissionError: If file access is blocked by security policy.
         """
         if not self.container:
             raise RuntimeError("Sandbox not initialized")
+
+        # Validate file access against security policy if security manager is available
+        if self.security_manager:
+            is_allowed = await self.security_manager.validate_file_access(
+                self.container.id, path
+            )
+            if not is_allowed:
+                raise PermissionError(f"File access blocked by security policy: {path}")
 
         try:
             # Get file archive
@@ -204,9 +225,18 @@ class DockerSandbox:
 
         Raises:
             RuntimeError: If write operation fails.
+            PermissionError: If file access is blocked by security policy.
         """
         if not self.container:
             raise RuntimeError("Sandbox not initialized")
+
+        # Validate file access against security policy if security manager is available
+        if self.security_manager:
+            is_allowed = await self.security_manager.validate_file_access(
+                self.container.id, path
+            )
+            if not is_allowed:
+                raise PermissionError(f"File access blocked by security policy: {path}")
 
         try:
             resolved_path = self._safe_resolve_path(path)

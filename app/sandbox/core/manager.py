@@ -10,6 +10,8 @@ from app.config import SandboxSettings
 from app.logger import logger
 from app.sandbox.core.sandbox import DockerSandbox
 
+# from app.sandbox.core.security import SandboxSecurityManager, SecurityPolicy
+
 
 class SandboxManager:
     """Docker sandbox manager.
@@ -31,6 +33,7 @@ class SandboxManager:
         max_sandboxes: int = 100,
         idle_timeout: int = 3600,
         cleanup_interval: int = 300,
+        security_policy=None,
     ):
         """Initializes sandbox manager.
 
@@ -38,6 +41,7 @@ class SandboxManager:
             max_sandboxes: Maximum sandbox count limit.
             idle_timeout: Idle timeout in seconds.
             cleanup_interval: Cleanup check interval in seconds.
+            security_policy: Security policy for sandboxes.
         """
         self.max_sandboxes = max_sandboxes
         self.idle_timeout = idle_timeout
@@ -45,6 +49,10 @@ class SandboxManager:
 
         # Docker client
         self._client = docker.from_env()
+
+        # Security manager (lazy import to avoid circular dependency)
+        self.security_manager = None
+        self._security_policy = security_policy
 
         # Resource mappings
         self._sandboxes: Dict[str, DockerSandbox] = {}
@@ -61,6 +69,14 @@ class SandboxManager:
 
         # Start automatic cleanup
         self.start_cleanup_task()
+
+    def _get_security_manager(self):
+        """Lazy load security manager to avoid circular imports."""
+        if self.security_manager is None:
+            from app.sandbox.core.security import SandboxSecurityManager
+
+            self.security_manager = SandboxSecurityManager(self._security_policy)
+        return self.security_manager
 
     async def ensure_image(self, image: str) -> bool:
         """Ensures Docker image is available.
@@ -143,11 +159,19 @@ class SandboxManager:
                 sandbox = DockerSandbox(config, volume_bindings)
                 await sandbox.create()
 
+                # Apply security policy to the container
+                if sandbox.container:
+                    await self._get_security_manager().apply_security_policy(
+                        sandbox.container
+                    )
+
                 self._sandboxes[sandbox_id] = sandbox
                 self._last_used[sandbox_id] = asyncio.get_event_loop().time()
                 self._locks[sandbox_id] = asyncio.Lock()
 
-                logger.info(f"Created sandbox {sandbox_id}")
+                logger.info(
+                    f"Created sandbox {sandbox_id} with security policy applied"
+                )
                 return sandbox_id
 
             except Exception as e:
@@ -215,6 +239,10 @@ class SandboxManager:
                 await asyncio.wait_for(self._cleanup_task, timeout=1.0)
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
+
+        # Clean up security manager
+        if self.security_manager:
+            await self.security_manager.cleanup()
 
         # Get all sandbox IDs to clean up
         async with self._global_lock:
@@ -297,6 +325,36 @@ class SandboxManager:
         """Async context manager exit."""
         await self.cleanup()
 
+    async def validate_file_operation(self, sandbox_id: str, file_path: str) -> bool:
+        """Validate file operation against security policy."""
+        return await self.security_manager.validate_file_access(sandbox_id, file_path)
+
+    async def validate_command_execution(self, sandbox_id: str, command: str) -> bool:
+        """Validate command execution against security policy."""
+        return await self.security_manager.validate_command_execution(
+            sandbox_id, command
+        )
+
+    async def get_security_report(self, sandbox_id: Optional[str] = None) -> Dict:
+        """Get security report for sandbox(s)."""
+        return await self.security_manager.get_security_report(sandbox_id)
+
+    async def validate_file_operation(self, sandbox_id: str, file_path: str) -> bool:
+        """Validate file operation against security policy."""
+        return await self._get_security_manager().validate_file_access(
+            sandbox_id, file_path
+        )
+
+    async def validate_command_execution(self, sandbox_id: str, command: str) -> bool:
+        """Validate command execution against security policy."""
+        return await self._get_security_manager().validate_command_execution(
+            sandbox_id, command
+        )
+
+    async def get_security_report(self, sandbox_id: Optional[str] = None) -> Dict:
+        """Get security report for sandbox(s)."""
+        return await self._get_security_manager().get_security_report(sandbox_id)
+
     def get_stats(self) -> Dict:
         """Gets manager statistics.
 
@@ -310,4 +368,14 @@ class SandboxManager:
             "idle_timeout": self.idle_timeout,
             "cleanup_interval": self.cleanup_interval,
             "is_shutting_down": self._is_shutting_down,
+            "security_violations": (
+                len(self._get_security_manager().violations)
+                if self.security_manager
+                else 0
+            ),
+            "monitored_containers": (
+                len(self._get_security_manager().monitored_containers)
+                if self.security_manager
+                else 0
+            ),
         }
