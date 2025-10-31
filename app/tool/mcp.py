@@ -7,6 +7,11 @@ from mcp.client.stdio import stdio_client
 from mcp.types import ListToolsResult, TextContent
 
 from app.logger import logger
+from app.mcp.connection_manager import (
+    ConnectionState,
+    MCPConnectionManager,
+    ServerConfig,
+)
 from app.tool.base import BaseTool, ToolResult
 from app.tool.tool_collection import ToolCollection
 
@@ -37,6 +42,7 @@ class MCPClientTool(BaseTool):
 class MCPClients(ToolCollection):
     """
     A collection of tools that connects to multiple MCP servers and manages available tools through the Model Context Protocol.
+    Enhanced with robust connection management, automatic reconnection, and health monitoring.
     """
 
     sessions: Dict[str, ClientSession] = {}
@@ -46,6 +52,13 @@ class MCPClients(ToolCollection):
     def __init__(self):
         super().__init__()  # Initialize with empty tools list
         self.name = "mcp"  # Keep name for backward compatibility
+        self.connection_manager = MCPConnectionManager()
+
+        # Register callbacks for connection events
+        self.connection_manager.add_connection_callback(
+            self._on_connection_state_changed
+        )
+        self.connection_manager.add_discovery_callback(self._on_tools_discovered)
 
     async def connect_sse(self, server_url: str, server_id: str = "") -> None:
         """Connect to an MCP server using SSE transport."""
@@ -54,19 +67,21 @@ class MCPClients(ToolCollection):
 
         server_id = server_id or server_url
 
-        # Always ensure clean disconnection before new connection
-        if server_id in self.sessions:
-            await self.disconnect(server_id)
+        # Use the new connection manager
+        config = ServerConfig(
+            server_id=server_id, connection_type="sse", url=server_url, enabled=True
+        )
 
-        exit_stack = AsyncExitStack()
-        self.exit_stacks[server_id] = exit_stack
+        await self.connection_manager.register_server(config)
+        success = await self.connection_manager.connect_server(server_id)
 
-        streams_context = sse_client(url=server_url)
-        streams = await exit_stack.enter_async_context(streams_context)
-        session = await exit_stack.enter_async_context(ClientSession(*streams))
-        self.sessions[server_id] = session
+        if not success:
+            raise RuntimeError(f"Failed to connect to MCP server {server_id}")
 
-        await self._initialize_and_list_tools(server_id)
+        # Update legacy sessions dict for backward compatibility
+        session = self.connection_manager.get_server_session(server_id)
+        if session:
+            self.sessions[server_id] = session
 
     async def connect_stdio(
         self, command: str, args: List[str], server_id: str = ""
@@ -77,53 +92,25 @@ class MCPClients(ToolCollection):
 
         server_id = server_id or command
 
-        # Always ensure clean disconnection before new connection
-        if server_id in self.sessions:
-            await self.disconnect(server_id)
-
-        exit_stack = AsyncExitStack()
-        self.exit_stacks[server_id] = exit_stack
-
-        server_params = StdioServerParameters(command=command, args=args)
-        stdio_transport = await exit_stack.enter_async_context(
-            stdio_client(server_params)
+        # Use the new connection manager
+        config = ServerConfig(
+            server_id=server_id,
+            connection_type="stdio",
+            command=command,
+            args=args,
+            enabled=True,
         )
-        read, write = stdio_transport
-        session = await exit_stack.enter_async_context(ClientSession(read, write))
-        self.sessions[server_id] = session
 
-        await self._initialize_and_list_tools(server_id)
+        await self.connection_manager.register_server(config)
+        success = await self.connection_manager.connect_server(server_id)
 
-    async def _initialize_and_list_tools(self, server_id: str) -> None:
-        """Initialize session and populate tool map."""
-        session = self.sessions.get(server_id)
-        if not session:
-            raise RuntimeError(f"Session not initialized for server {server_id}")
+        if not success:
+            raise RuntimeError(f"Failed to connect to MCP server {server_id}")
 
-        await session.initialize()
-        response = await session.list_tools()
-
-        # Create proper tool objects for each server tool
-        for tool in response.tools:
-            original_name = tool.name
-            tool_name = f"mcp_{server_id}_{original_name}"
-            tool_name = self._sanitize_tool_name(tool_name)
-
-            server_tool = MCPClientTool(
-                name=tool_name,
-                description=tool.description,
-                parameters=tool.inputSchema,
-                session=session,
-                server_id=server_id,
-                original_name=original_name,
-            )
-            self.tool_map[tool_name] = server_tool
-
-        # Update tools tuple
-        self.tools = tuple(self.tool_map.values())
-        logger.info(
-            f"Connected to server {server_id} with tools: {[tool.name for tool in response.tools]}"
-        )
+        # Update legacy sessions dict for backward compatibility
+        session = self.connection_manager.get_server_session(server_id)
+        if session:
+            self.sessions[server_id] = session
 
     def _sanitize_tool_name(self, name: str) -> str:
         """Sanitize tool name to match MCPClientTool requirements."""
@@ -146,49 +133,143 @@ class MCPClients(ToolCollection):
 
     async def list_tools(self) -> ListToolsResult:
         """List all available tools."""
+        all_tools_results = await self.connection_manager.list_all_tools()
         tools_result = ListToolsResult(tools=[])
-        for session in self.sessions.values():
-            response = await session.list_tools()
-            tools_result.tools += response.tools
+
+        for server_id, result in all_tools_results.items():
+            tools_result.tools.extend(result.tools)
+
         return tools_result
+
+    def _on_connection_state_changed(
+        self, server_id: str, new_state: ConnectionState
+    ) -> None:
+        """Handle connection state changes."""
+        logger.info(
+            f"MCP server {server_id} connection state changed to {new_state.value}"
+        )
+
+        if new_state == ConnectionState.CONNECTED:
+            # Update legacy sessions dict
+            session = self.connection_manager.get_server_session(server_id)
+            if session:
+                self.sessions[server_id] = session
+        elif new_state in [ConnectionState.DISCONNECTED, ConnectionState.FAILED]:
+            # Clean up legacy references
+            self.sessions.pop(server_id, None)
+            self.exit_stacks.pop(server_id, None)
+
+            # Remove tools from this server
+            self.tool_map = {
+                k: v
+                for k, v in self.tool_map.items()
+                if getattr(v, "server_id", None) != server_id
+            }
+            self.tools = tuple(self.tool_map.values())
+
+    def _on_tools_discovered(self, server_id: str, tool_names: List[str]) -> None:
+        """Handle tool discovery events."""
+        logger.info(f"Discovered tools from server {server_id}: {tool_names}")
+
+        # Get the session for this server
+        session = self.connection_manager.get_server_session(server_id)
+        if not session:
+            logger.warning(f"No session available for server {server_id}")
+            return
+
+        # Create tool objects for discovered tools
+        try:
+            # Get tool details from the server
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're in an async context, schedule the tool creation
+                asyncio.create_task(self._create_tools_for_server(server_id, session))
+            else:
+                # If not in async context, run synchronously
+                loop.run_until_complete(
+                    self._create_tools_for_server(server_id, session)
+                )
+        except Exception as e:
+            logger.error(f"Error creating tools for server {server_id}: {e}")
+
+    async def _create_tools_for_server(
+        self, server_id: str, session: ClientSession
+    ) -> None:
+        """Create tool objects for a server's tools."""
+        try:
+            response = await session.list_tools()
+
+            for tool in response.tools:
+                original_name = tool.name
+                tool_name = f"mcp_{server_id}_{original_name}"
+                tool_name = self._sanitize_tool_name(tool_name)
+
+                server_tool = MCPClientTool(
+                    name=tool_name,
+                    description=tool.description,
+                    parameters=tool.inputSchema,
+                    session=session,
+                    server_id=server_id,
+                    original_name=original_name,
+                )
+                self.tool_map[tool_name] = server_tool
+
+            # Update tools tuple
+            self.tools = tuple(self.tool_map.values())
+            logger.info(f"Created {len(response.tools)} tools for server {server_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to create tools for server {server_id}: {e}")
+
+    async def reconnect_server(self, server_id: str) -> bool:
+        """Reconnect to a specific MCP server."""
+        return await self.connection_manager.reconnect_server(server_id)
+
+    def get_connected_servers(self) -> List[str]:
+        """Get list of currently connected server IDs."""
+        return self.connection_manager.get_connected_servers()
+
+    def get_server_health(self, server_id: str) -> Optional[Dict]:
+        """Get health information for a server."""
+        connection_info = self.connection_manager.get_connection_info(server_id)
+        if not connection_info:
+            return None
+
+        return {
+            "server_id": server_id,
+            "state": connection_info.state.value,
+            "last_connected": connection_info.last_connected,
+            "last_error": connection_info.last_error,
+            "retry_count": connection_info.retry_count,
+            "config": {
+                "connection_type": connection_info.config.connection_type,
+                "enabled": connection_info.config.enabled,
+                "max_retries": connection_info.config.max_retries,
+            },
+        }
 
     async def disconnect(self, server_id: str = "") -> None:
         """Disconnect from a specific MCP server or all servers if no server_id provided."""
         if server_id:
-            if server_id in self.sessions:
-                try:
-                    exit_stack = self.exit_stacks.get(server_id)
+            await self.connection_manager.disconnect_server(server_id)
+            # Clean up legacy references
+            self.sessions.pop(server_id, None)
+            self.exit_stacks.pop(server_id, None)
 
-                    # Close the exit stack which will handle session cleanup
-                    if exit_stack:
-                        try:
-                            await exit_stack.aclose()
-                        except RuntimeError as e:
-                            if "cancel scope" in str(e).lower():
-                                logger.warning(
-                                    f"Cancel scope error during disconnect from {server_id}, continuing with cleanup: {e}"
-                                )
-                            else:
-                                raise
-
-                    # Clean up references
-                    self.sessions.pop(server_id, None)
-                    self.exit_stacks.pop(server_id, None)
-
-                    # Remove tools associated with this server
-                    self.tool_map = {
-                        k: v
-                        for k, v in self.tool_map.items()
-                        if v.server_id != server_id
-                    }
-                    self.tools = tuple(self.tool_map.values())
-                    logger.info(f"Disconnected from MCP server {server_id}")
-                except Exception as e:
-                    logger.error(f"Error disconnecting from server {server_id}: {e}")
+            # Remove tools associated with this server
+            self.tool_map = {
+                k: v
+                for k, v in self.tool_map.items()
+                if getattr(v, "server_id", None) != server_id
+            }
+            self.tools = tuple(self.tool_map.values())
         else:
-            # Disconnect from all servers in a deterministic order
-            for sid in sorted(list(self.sessions.keys())):
-                await self.disconnect(sid)
+            # Disconnect from all servers
+            await self.connection_manager.shutdown()
+            self.sessions.clear()
+            self.exit_stacks.clear()
             self.tool_map = {}
             self.tools = tuple()
             logger.info("Disconnected from all MCP servers")

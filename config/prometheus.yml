@@ -1,0 +1,60 @@
+# Prometheus configuration for OpenManus monitoring
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: "openmanus-monitor"
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  # OpenManus application metrics
+  - job_name: "openmanus"
+    static_configs:
+      - targets: ["openmanus:9090"]
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: http
+
+  # OpenManus health metrics
+  - job_name: "openmanus-health"
+    static_configs:
+      - targets: ["openmanus:8080"]
+    scrape_interval: 15s
+    metrics_path: /metrics
+    scheme: http
+
+  # Redis metrics (if redis_exporter is used)
+  - job_name: "redis"
+    static_configs:
+      - targets: ["redis:6379"]
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: http
+
+  # Nginx metrics (if nginx-prometheus-exporter is used)
+  - job_name: "nginx"
+    static_configs:
+      - targets: ["nginx:9113"]
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: http
+
+  # Node exporter for system metrics (optional)
+  - job_name: "node"
+    static_configs:
+      - targets: ["node-exporter:9100"]
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: http
+
+  # Prometheus itself
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+    scrape_interval: 30s
+    metrics_path: /metrics
+    scheme: http

@@ -10,7 +10,7 @@ import asyncio
 import json
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.config import config
 from app.logger import logger

@@ -1,0 +1,88 @@
+# Docker Compose override for development environment
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+version: "3.8"
+
+services:
+  openmanus:
+    build:
+      target: development
+
+    environment:
+      - OPENMANUS_ENV=development
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+
+    volumes:
+      # Mount source code for live reloading
+      - .:/app:rw
+      - /app/.venv # Exclude virtual environment
+      - /app/__pycache__ # Exclude Python cache
+      - /app/.pytest_cache # Exclude pytest cache
+
+    # Override command for development
+    command: ["python", "main.py"]
+
+    # Enable debugging
+    stdin_open: true
+    tty: true
+
+    # Development ports
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+      - "9090:9090"
+      - "5678:5678" # Debug port
+
+    # Relaxed resource limits for development
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+
+  # Development database (SQLite or PostgreSQL)
+  postgres:
+    image: postgres:15-alpine
+    container_name: openmanus-postgres-dev
+
+    environment:
+      - POSTGRES_DB=openmanus_dev
+      - POSTGRES_USER=openmanus
+      - POSTGRES_PASSWORD=dev_password
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    networks:
+      - openmanus-network
+
+  # Development tools container
+  dev-tools:
+    build:
+      context: .
+      target: development
+
+    container_name: openmanus-dev-tools
+
+    volumes:
+      - .:/app:rw
+
+    working_dir: /app
+
+    command: ["tail", "-f", "/dev/null"] # Keep container running
+
+    networks:
+      - openmanus-network
+
+    profiles:
+      - dev-tools
+
+volumes:
+  postgres-dev-data:
+    driver: local

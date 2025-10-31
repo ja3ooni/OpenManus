@@ -1,0 +1,208 @@
+# Docker Compose configuration for OpenManus
+# Supports development, testing, and production environments
+
+version: "3.8"
+
+services:
+  # Main OpenManus application
+  openmanus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ${BUILD_TARGET:-production}
+      args:
+        BUILD_DATE: ${BUILD_DATE:-}
+        VERSION: ${VERSION:-latest}
+        VCS_REF: ${VCS_REF:-}
+
+    container_name: openmanus-app
+
+    ports:
+      - "${OPENMANUS_PORT:-8000}:8000" # Main application port
+      - "${HEALTH_PORT:-8080}:8080" # Health check port
+      - "${METRICS_PORT:-9090}:9090" # Metrics port
+
+    environment:
+      - OPENMANUS_ENV=${OPENMANUS_ENV:-production}
+      - OPENMANUS_CONFIG_DIR=/app/config
+      - OPENMANUS_WORKSPACE_DIR=/app/workspace
+      - OPENMANUS_LOG_DIR=/app/logs
+      - OPENMANUS_DATA_DIR=/app/data
+
+      # LLM Configuration (override in .env file)
+      - OPENMANUS_LLM_API_KEY=${OPENMANUS_LLM_API_KEY:-}
+      - OPENMANUS_LLM_MODEL=${OPENMANUS_LLM_MODEL:-}
+      - OPENMANUS_LLM_BASE_URL=${OPENMANUS_LLM_BASE_URL:-}
+
+      # Database configuration (if needed)
+      - DATABASE_URL=${DATABASE_URL:-}
+
+      # Security
+      - SECRET_KEY=${SECRET_KEY:-}
+
+    volumes:
+      # Configuration
+      - ./config:/app/config:ro
+
+      # Persistent data
+      - openmanus-workspace:/app/workspace
+      - openmanus-logs:/app/logs
+      - openmanus-data:/app/data
+
+      # Development mode: mount source code
+      - ${PWD}:/app:${MOUNT_MODE:-ro}
+
+    networks:
+      - openmanus-network
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    depends_on:
+      - redis
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: ${MEMORY_LIMIT:-2G}
+          cpus: "${CPU_LIMIT:-1.0}"
+        reservations:
+          memory: ${MEMORY_RESERVATION:-512M}
+          cpus: "${CPU_RESERVATION:-0.25}"
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    container_name: openmanus-redis
+
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+
+    volumes:
+      - redis-data:/data
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
+
+    networks:
+      - openmanus-network
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+  # Nginx reverse proxy (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: openmanus-nginx
+
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/ssl:/etc/nginx/ssl:ro
+      - nginx-logs:/var/log/nginx
+
+    networks:
+      - openmanus-network
+
+    restart: unless-stopped
+
+    depends_on:
+      - openmanus
+
+    profiles:
+      - proxy
+
+  # Prometheus for metrics collection (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: openmanus-prometheus
+
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+    networks:
+      - openmanus-network
+
+    restart: unless-stopped
+
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--storage.tsdb.retention.time=200h"
+      - "--web.enable-lifecycle"
+
+    profiles:
+      - monitoring
+
+  # Grafana for metrics visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: openmanus-grafana
+
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana:/etc/grafana/provisioning:ro
+
+    networks:
+      - openmanus-network
+
+    restart: unless-stopped
+
+    depends_on:
+      - prometheus
+
+    profiles:
+      - monitoring
+
+# Named volumes for persistent data
+volumes:
+  openmanus-workspace:
+    driver: local
+  openmanus-logs:
+    driver: local
+  openmanus-data:
+    driver: local
+  redis-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  nginx-logs:
+    driver: local
+
+# Network for service communication
+networks:
+  openmanus-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
